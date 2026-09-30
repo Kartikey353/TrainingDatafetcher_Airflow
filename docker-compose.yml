@@ -1,0 +1,120 @@
+# Local development stack: Airflow (orchestration) + Postgres (Airflow's own metadata) + MongoDB (our data).
+# Start:  docker compose up airflow-init   (once)   then   docker compose up -d
+# UI:     http://localhost:8080
+
+x-airflow-common: &airflow-common
+  build: .
+  image: social-pipeline-airflow:local
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__PARALLELISM: "16"   # hard cap on tasks running at once (each is a Python process)
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    # Local-only convenience: no login screen. Do NOT expose port 8080 beyond localhost with this on.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
+    # Our code
+    PYTHONPATH: /opt/airflow
+    CONFIG_PATH: /opt/airflow/config/sources.yaml
+    DATA_DIR: /opt/airflow/data
+    MONGO_URI: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
+    MONGO_DB: lemmy_pipeline
+    AUTHOR_HASH_SALT: ${AUTHOR_HASH_SALT}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./pipeline:/opt/airflow/pipeline
+    - ./config:/opt/airflow/config
+    - ./data:/opt/airflow/data
+    - airflow-logs:/opt/airflow/logs
+  depends_on: &airflow-depends
+    postgres:
+      condition: service_healthy
+    mongo:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+    ports:
+      - "127.0.0.1:27017:27017"   # localhost only, so you can inspect data with MongoDB Compass
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      retries: 10
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    command: ["bash", "-c", "mkdir -p /opt/airflow/logs && airflow db migrate && airflow pools set ingest 4 'Concurrent ingest/discovery tasks'"]
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    depends_on:
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  mongo-data:
+  airflow-logs:

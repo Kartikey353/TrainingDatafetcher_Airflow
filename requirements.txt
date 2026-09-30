@@ -1,0 +1,5 @@
+# Extra packages installed on top of the Airflow image (Airflow itself is NOT listed here).
+pymongo>=4.7
+httpx>=0.27
+pyyaml>=6.0
+# Added in later stages: langid (language detection), datasketch (near-duplicate removal)

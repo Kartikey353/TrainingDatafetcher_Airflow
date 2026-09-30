@@ -1,0 +1,81 @@
+# Edit this file to shape the pipeline. Lemmy is wired up; other source types plug in later.
+
+schedules:
+  ingest_every_minutes: 30      # each instance's DAG runs this often, staggered so they don't all fire at once
+  discovery: "0 2 * * 0"        # weekly (UTC): re-scan instances for new communities matching your themes
+  clean:  "10 * * * *"          # (Stage 3)
+  export: "0 3 * * *"           # (Stage 3)
+  # Thread building has no cron: it is triggered automatically whenever an ingest finishes.
+
+sources:
+  lemmy:
+    enabled: true
+
+    # Every instance gets its OWN Airflow DAG (own schedule, failures isolated).
+    # The discovery DAG probes each one first; instances that aren't a working Lemmy API are marked
+    # "unsupported" in the `instances` collection and skipped.
+    instances:
+      - lemmy.world
+      - programming.dev
+      - lemmy.blahaj.zone
+      - hexbear.net
+      - ani.social
+      - beehaw.org
+      - thelemmy.club
+      - hilariouschaos.com
+      - crazypeople.online
+      - scribe.disroot.org
+      - lazysoci.al
+      - lemmy.vg
+
+    # Communities you pick by hand. Always ingested, and their category here always wins.
+    communities:                # `category` = the theme each community's threads are filed under
+      - { instance: "lemmy.world",     name: "casualconversation", category: "Casual Conversation" }
+      - { instance: "lemmy.world",     name: "cooking",             category: "Food" }
+      - { instance: "lemmy.world",     name: "relationship_advice", category: "Relationships" }
+      - { instance: "lemmy.world",     name: "dating",              category: "Relationships" }
+      - { instance: "programming.dev", name: "cs_career_questions", category: "Career" }
+
+    # ---- Discovery: finds more communities on every instance, matched to your themes.
+    # Keywords are matched against the words in a community's name and title. Words of 8+ letters also
+    # match inside the name (e.g. "relationship" in "relationshipadvice"); shorter ones must be whole words.
+    themes:
+      Relationships: [relationship, dating, love, marriage, breakup, friendship, family, parenting, romance, couples]
+      Career: [career, job, jobs, work, workplace, interview, resume, freelance, hiring, salary, employment]
+      Food: [food, cooking, recipe, baking, mealprep, kitchen, nutrition, dinner, vegan, vegetarian]
+      Music: [music, song, album, guitar, piano, band, musician]
+      Casual Conversation: [casualconversation, conversation, chat, discussion, asklemmy, askanything, showerthoughts, nostupidquestions, questions]
+    exclude_keywords: [meme, porn, nsfw, hentai, nudes, gore, shitpost, circlejerk]   # substring match, drops the community
+    discovery:
+      sort: TopMonth            # how each instance ranks its communities while we scan
+      pages: 4                  # x50 communities scanned per instance
+      min_comments: 300         # skip communities with little discussion
+      min_comments_per_post: 2  # skip link-dump communities (lots of posts, no conversation)
+      min_active_users: 5       # active users in the last month
+      max_per_instance: 15      # keep the best N per instance
+      auto_approve: true        # true = start ingesting immediately; false = wait until you set status "approved"
+
+    # ---- Ingest behaviour (applies to every community)
+    sort: New
+    posts_per_run: 50           # max NEW posts ingested per community per run (incremental mode)
+    backfill_max_posts: 2000    # first run only: how many posts back in history to scan
+    stop_after_known: 20        # incremental: stop scanning after this many already-stored posts in a row
+    min_age_hours: 6            # wait for discussion to mature before pulling comments
+    max_comments_per_post: 300
+    min_score: 1                # drop items scored below this at ingest time
+    request_delay_seconds: 1.0  # politeness delay between API calls to one instance
+
+cleaning:
+  min_words: 30               # documents shorter than this are dropped
+  max_words: 20000
+  min_alpha_ratio: 0.6        # share of alphabetic chars, filters emoji/symbol spam
+  max_repeat_line_ratio: 0.3  # share of duplicated lines within a doc
+  max_top_ngram_char_ratio: 0.25   # repeated 3-gram share (Gopher-style repetition filter)
+  max_url_ratio: 0.2          # share of characters that are URLs, filters link/promo spam
+  languages: [en]
+  min_lang_confidence: 0.8
+  scrub_pii: true             # emails, phone numbers, @handles, IPs
+  drop_nsfw: true
+  drop_authors: [AutoModerator, "[deleted]"]
+  near_dup_threshold: 0.85    # MinHash Jaccard threshold for near-duplicate removal
+  valid_fraction: 0.02        # share of docs held out as valid.jsonl
